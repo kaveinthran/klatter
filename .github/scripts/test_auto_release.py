@@ -46,6 +46,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(automation.release_complete(None, SHA))
         self.assertFalse(automation.release_complete({"draft": True}, SHA))
 
+    def test_draft_is_recovered_when_github_has_not_created_its_tag(self):
+        draft = {"id": 42, "draft": True, "tag_name": automation.release_tag(SHA), "target_commitish": SHA}
+        with patch.object(automation, "api", side_effect=[None, [draft]]):
+            self.assertEqual(automation.find_release(SHA), draft)
+
     def test_complete_commit_skips_but_wrong_commit_is_rejected(self):
         release = self.complete_release()
         self.assertTrue(automation.release_complete(release, SHA))

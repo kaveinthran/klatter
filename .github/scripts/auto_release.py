@@ -80,6 +80,17 @@ def release_tag(source_sha):
     return "upstream-" + valid_sha(source_sha)
 
 
+def find_release(source_sha):
+    tag = release_tag(source_sha)
+    release = api(f"repos/{DESTINATION}/releases/tags/{tag}", missing_ok=True)
+    if release is None:
+        # A draft's real tag may not exist yet; GitHub exposes it by ID/list,
+        # while the tag endpoint can still return 404 to an authenticated caller.
+        releases = api(f"repos/{DESTINATION}/releases?per_page=100")
+        release = next((item for item in releases if item.get("tag_name") == tag), None)
+    return release
+
+
 def release_complete(release, source_sha):
     if not release or release.get("draft"):
         return False
@@ -169,7 +180,7 @@ def check(root):
     commit = api(f"repos/{UPSTREAM}/commits/main")
     source_sha = valid_sha(commit["sha"])
     sync_source(root, source_sha)
-    release = api(f"repos/{DESTINATION}/releases/tags/{release_tag(source_sha)}", missing_ok=True)
+    release = find_release(source_sha)
     needed = not release_complete(release, source_sha)
     if not needed:
         verify_tag(source_sha)
@@ -380,8 +391,7 @@ def verify_upload(release, root):
 def publish(root, source_sha):
     info = validate_artifact(root, source_sha)
     tag = release_tag(source_sha)
-    release_path = f"repos/{DESTINATION}/releases/tags/{tag}"
-    release = api(release_path, missing_ok=True)
+    release = find_release(source_sha)
     if release_complete(release, source_sha):
         verify_tag(source_sha)
         summary("This source commit is already published; no assets changed.")
@@ -416,6 +426,10 @@ def publish(root, source_sha):
     if not release:
         run("gh", "release", "create", tag, "--repo", DESTINATION, "--target", source_sha,
             "--title", f"Klatter {info['version']} for NVDA ({source_sha[:12]})", "--notes-file", str(notes_path), "--draft")
+        release = find_release(source_sha)
+    if not release or not release.get("draft") or release.get("target_commitish") != source_sha:
+        raise ValueError("Expected an unpublished, source-matching draft before upload")
+    release_path = f"repos/{DESTINATION}/releases/{release['id']}"
     run("gh", "release", "upload", tag, *[str(p) for p in sorted(root.iterdir())], "--repo", DESTINATION, "--clobber")
     verify_upload(api(release_path), root)
     run("gh", "release", "edit", tag, "--repo", DESTINATION, "--notes-file", str(notes_path), "--draft=false", "--latest")
