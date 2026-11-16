@@ -74,6 +74,16 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "tag"):
                 automation.verify_tag(SHA)
 
+    def test_change_baseline_ignores_newer_manual_releases_and_unpublished_drafts(self):
+        releases = [
+            {"tag_name": "upstream-old", "target_commitish": SHA, "published_at": "2026-11-15T12:00:00Z"},
+            {"tag_name": "manual", "target_commitish": "b" * 40, "published_at": "2026-11-16T12:00:00Z"},
+            {"tag_name": "upstream-draft", "target_commitish": "c" * 40, "draft": True,
+             "published_at": "2026-11-17T12:00:00Z"},
+        ]
+        self.assertEqual(automation.previous_source(releases), SHA)
+        self.assertEqual(automation.previous_source([]), "")
+
 
 class ArtifactTests(unittest.TestCase):
     def setUp(self):
@@ -90,15 +100,25 @@ class ArtifactTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
         (self.source / "LICENSE.md").write_text("MIT licence\n", encoding="utf-8")
+        (self.source / "readme.md").write_text("# Current features\n\nEnglish speech.\n", encoding="utf-8")
+        (self.source / ".community-build.json").write_text(json.dumps({"source_sha": SHA, "version": "0.1.0",
+                "upstream_version": "0.1.0", "previous_sha": ""}), encoding="utf-8")
         self.output = self.root / "release"
         result = subprocess.CompletedProcess([], 0, SHA + "\n", "")
-        with patch.object(automation, "run", return_value=result), patch.object(automation, "summary"):
+        with patch.object(automation, "run", return_value=result), patch.object(automation, "summary"), \
+                patch.object(automation, "changelog", return_value=("# Full change details\n", [{"sha": SHA}])):
             automation.package(self.source, self.output, SHA)
 
     def test_valid_artifact_and_alias_round_trip(self):
         info = automation.validate_artifact(self.output, SHA)
         self.assertEqual(info["version"], "0.1.0")
-        self.assertEqual(len(list(self.output.iterdir())), 6)
+        self.assertEqual(len(list(self.output.iterdir())), 8)
+
+    def test_checksums_use_the_same_order_and_lf_on_windows_and_linux(self):
+        path = self.output / "SHA256SUMS.txt"
+        names = [line.split("  ", 1)[1] for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(names, sorted(names))
+        self.assertNotIn(b"\r\n", path.read_bytes())
 
     def test_tampered_alias_is_rejected(self):
         (self.output / "klatter.nvda-addon").write_bytes(b"tampered")
@@ -209,6 +229,48 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.real_run("git", "rev-parse", "HEAD", cwd=self.fork).stdout, first)
         self.sync(source_sha, self.now + timedelta(days=28))
         self.assertNotEqual(self.real_run("git", "rev-parse", "HEAD", cwd=self.fork).stdout, first)
+
+    def test_full_first_history_and_incremental_history_preserve_complete_messages(self):
+        previous = self.real_run("git", "rev-parse", "HEAD", cwd=self.source).stdout.strip()
+        (self.source / "engine.txt").write_text("new feature\n", encoding="utf-8")
+        current = self.commit(self.source, "New feature\n\nComplete first detail.\nComplete second detail.")
+        first, all_commits = automation.changelog(self.source, current, "", "2026.1116.1", "0.1.0")
+        self.assertIn("Initial source", first)
+        self.assertIn("Complete second detail.", first)
+        self.assertEqual(len(all_commits), 2)
+        incremental, commits = automation.changelog(self.source, current, previous, "2026.1116.2", "0.1.0")
+        self.assertNotIn("## Initial source", incremental)
+        self.assertIn("Complete first detail.", incremental)
+        self.assertEqual([commit["sha"] for commit in commits], [current])
+
+
+class VersionTests(unittest.TestCase):
+    def test_partial_draft_retry_keeps_the_same_versioned_asset_name(self):
+        draft = {"draft": True, "target_commitish": SHA, "name": f"Klatter 2026.1116.2 for NVDA ({SHA[:12]})",
+                 "assets": [{"name": "klatter-2026.1116.2.nvda-addon"}]}
+        recovered = automation.community_version(SHA, draft, "19", datetime(2026, 11, 17, tzinfo=timezone.utc))
+        self.assertEqual(recovered, "2026.1116.2")
+        self.assertEqual(f"klatter-{recovered}.nvda-addon", draft["assets"][0]["name"])
+
+    def test_community_version_increases_and_preserves_original_upstream_version(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            manifest = source / "nvda/addon/manifest.ini"
+            manifest.parent.mkdir(parents=True)
+            original = 'name = klatter\nsummary = "Klatter speech synthesizer"\nversion = 0.1.0\n'
+            result = subprocess.CompletedProcess([], 0, SHA + "\n", "")
+            versions = []
+            for run_number, date in [("2", datetime(2026, 11, 16, tzinfo=timezone.utc)),
+                                     ("9", datetime(2026, 11, 16, tzinfo=timezone.utc)),
+                                     ("10", datetime(2026, 11, 17, tzinfo=timezone.utc))]:
+                manifest.write_text(original, encoding="utf-8")
+                with patch.object(automation, "run", return_value=result), patch.object(automation, "summary"):
+                    automation.prepare(source, SHA, "", run_number, date)
+                context = json.loads((source / ".community-build.json").read_text(encoding="utf-8"))
+                self.assertEqual(context["upstream_version"], "0.1.0")
+                self.assertIn("community build", manifest.read_text(encoding="utf-8"))
+                versions.append(tuple(map(int, context["version"].split("."))))
+            self.assertEqual(versions, sorted(set(versions)))
 
 
 if __name__ == "__main__":

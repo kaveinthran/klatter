@@ -23,6 +23,8 @@ jobs:
     outputs:
       sha: ${{ steps.upstream.outputs.sha }}
       build_needed: ${{ steps.upstream.outputs.build_needed }}
+      previous_sha: ${{ steps.upstream.outputs.previous_sha }}
+      community_version: ${{ steps.upstream.outputs.community_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,6 +49,8 @@ jobs:
       contents: read
     env:
       SOURCE_SHA: ${{ needs.check.outputs.sha }}
+      PREVIOUS_SHA: ${{ needs.check.outputs.previous_sha }}
+      COMMUNITY_VERSION: ${{ needs.check.outputs.community_version }}
       PYTHONDONTWRITEBYTECODE: '1'
     defaults:
       run:
@@ -64,6 +68,7 @@ jobs:
           repository: SaqibS/klatter
           ref: ${{ needs.check.outputs.sha }}
           path: upstream
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -84,7 +89,10 @@ jobs:
         run: cargo test --locked --workspace --all-targets
       - name: Build upstream NVDA package
         working-directory: upstream
-        run: python nvda/build.py
+        run: |
+          python ../automation/.github/scripts/auto_release.py prepare --source .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python nvda/build.py
       - name: Test driver against the packaged release DLL
         working-directory: upstream
         run: python nvda/test_driver.py target/x86_64-pc-windows-msvc/release/klatter.dll
