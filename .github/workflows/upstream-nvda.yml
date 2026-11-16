@@ -1,0 +1,128 @@
+name: Build latest upstream NVDA add-on
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-nvda-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check and sync upstream
+    if: github.repository == 'kaveinthran/klatter' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.upstream.outputs.sha }}
+      build_needed: ${{ steps.upstream.outputs.build_needed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test automation boundaries and retry behavior
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+      - name: Check source, sync fork and decide whether to build
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/auto_release.py check
+
+  build:
+    name: Build and test Windows add-on
+    needs: check
+    if: needs.check.outputs.build_needed == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ needs.check.outputs.sha }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Get trusted fork automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: automation
+          persist-credentials: false
+      - name: Get exact upstream source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SaqibS/klatter
+          ref: ${{ needs.check.outputs.sha }}
+          path: upstream
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install Rust and test dependencies
+        run: |
+          rustup toolchain install stable --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup target add x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install --disable-pip-version-check -r automation/.github/ci-requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test Rust workspace and all targets
+        working-directory: upstream
+        run: cargo test --locked --workspace --all-targets
+      - name: Build upstream NVDA package
+        working-directory: upstream
+        run: python nvda/build.py
+      - name: Test driver against the packaged release DLL
+        working-directory: upstream
+        run: python nvda/test_driver.py target/x86_64-pc-windows-msvc/release/klatter.dll
+      - name: Test analysis and listening tools
+        working-directory: upstream
+        run: python -m unittest discover -s tools
+      - name: Inspect package and prepare release files
+        run: python automation/.github/scripts/auto_release.py package --source upstream --output release
+      - name: Upload validated release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nvda-release-${{ needs.check.outputs.sha }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  publish:
+    name: Publish verified GitHub release
+    needs: [check, build]
+    if: needs.check.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Get trusted publishing automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download release files as data
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nvda-release-${{ needs.check.outputs.sha }}
+          path: release
+      - name: Validate, publish and check public download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.check.outputs.sha }}
+        run: python3 .github/scripts/auto_release.py publish --root release
