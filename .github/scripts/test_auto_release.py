@@ -90,6 +90,37 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(automation.previous_source([]), "")
 
 
+class DraftCreationTests(unittest.TestCase):
+    def test_creation_response_is_used_without_a_second_lookup(self):
+        draft = {"id": 42, "draft": True, "tag_name": automation.release_tag(SHA),
+                 "target_commitish": SHA}
+        with tempfile.TemporaryDirectory() as temporary:
+            notes = Path(temporary) / "release-notes.md"
+            notes.write_text("Complete release notes.\n", encoding="utf-8")
+            with patch.object(automation, "run", return_value=
+                    subprocess.CompletedProcess([], 0, json.dumps(draft), "")) as run, \
+                    patch.object(automation, "find_release", side_effect=AssertionError("Stale lookup")):
+                self.assertEqual(automation.create_draft(SHA, "Community build", notes), draft)
+            request = json.loads(notes.with_name("release-request.json").read_text())
+            self.assertEqual(request, {"tag_name": automation.release_tag(SHA),
+                "target_commitish": SHA, "name": "Community build",
+                "body": "Complete release notes.\n", "draft": True})
+            self.assertEqual(run.call_args.args[:4], ("gh", "api", "--method", "POST"))
+
+    def test_wrong_identity_or_published_response_is_rejected(self):
+        draft = {"id": 42, "draft": True, "tag_name": automation.release_tag(SHA),
+                 "target_commitish": SHA}
+        with tempfile.TemporaryDirectory() as temporary:
+            notes = Path(temporary) / "release-notes.md"
+            notes.write_text("Notes", encoding="utf-8")
+            for changes in ({"id": None}, {"id": True}, {"id": -1}, {"draft": False},
+                            {"tag_name": "different"}, {"target_commitish": "b" * 40}):
+                with self.subTest(changes=changes), patch.object(automation, "run", return_value=
+                        subprocess.CompletedProcess([], 0, json.dumps(draft | changes), "")):
+                    with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                        automation.create_draft(SHA, "Community build", notes)
+
+
 class CheckTests(unittest.TestCase):
     def test_advertised_main_is_used_instead_of_commit_api(self):
         result = subprocess.CompletedProcess([], 0, SHA + "\trefs/heads/main\n", "")

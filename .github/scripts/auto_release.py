@@ -417,6 +417,24 @@ def verify_upload(release, root):
             raise ValueError("Uploaded asset hash/size mismatch")
 
 
+def create_draft(source_sha, title, notes_path):
+    """Use the creation response; a new draft may not appear in list/tag reads yet."""
+    tag = release_tag(source_sha)
+    request_path = notes_path.with_name("release-request.json")
+    write_utf8(request_path, json.dumps({
+        "tag_name": tag, "target_commitish": source_sha, "name": title,
+        "body": notes_path.read_text(encoding="utf-8"), "draft": True,
+    }))
+    result = run("gh", "api", "--method", "POST", f"repos/{DESTINATION}/releases",
+                 "--input", str(request_path))
+    release = json.loads(result.stdout)
+    if (type(release.get("id")) is not int or release["id"] <= 0 or
+            release.get("draft") is not True or release.get("tag_name") != tag or
+            release.get("target_commitish") != source_sha):
+        raise ValueError("Created draft identity mismatch")
+    return release
+
+
 def publish(root, source_sha):
     info = validate_artifact(root, source_sha)
     tag = release_tag(source_sha)
@@ -453,9 +471,8 @@ def publish(root, source_sha):
     notes_path = root.parent / "release-notes.md"
     notes_path.write_text(notes, encoding="utf-8")
     if not release:
-        run("gh", "release", "create", tag, "--repo", DESTINATION, "--target", source_sha,
-            "--title", f"Klatter {info['version']} for NVDA ({source_sha[:12]})", "--notes-file", str(notes_path), "--draft")
-        release = find_release(source_sha)
+        release = create_draft(source_sha,
+            f"Klatter {info['version']} for NVDA ({source_sha[:12]})", notes_path)
     if not release or not release.get("draft") or release.get("target_commitish") != source_sha:
         raise ValueError("Expected an unpublished, source-matching draft before upload")
     release_path = f"repos/{DESTINATION}/releases/{release['id']}"
