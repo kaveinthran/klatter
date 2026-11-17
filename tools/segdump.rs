@@ -5,8 +5,7 @@
 //! initial), flap (1 for a /t/ or /d/ spoken as a flap), trans_in_ms and
 //! trans_out_ms (the formant transitions from the previous phone and into
 //! the next that lie inside this span; the rest is the phone's steady state),
-//! word (the word spelled out on its first phone). This is the `segs.tsv`
-//! input for tools/eloquence.
+//! word (the word spelled out on its first phone).
 //!
 //! Usage:
 //!   cargo run --release --example segdump -- text.txt > segs.tsv
@@ -14,10 +13,11 @@
 //!   cargo run --release --example segdump -- --frames text.txt [SCALE] > frames.tsv
 //!
 //! With SCALE, every duration is multiplied by it and the result is also
-//! rendered to out.wav (16 kHz), e.g. to match a reference speaking rate.
+//! rendered to out.wav (16 kHz), e.g. to inspect timing at a faster rate.
 //! With --frames, it prints one row per 5 ms frame instead: the segment, its
-//! stress and position, the voice-source parameters (AV, AH, OQ, TL, B1, F0)
-//! and the rendered level in dB.
+//! stress, position, word and timing, the voice-source parameters (AV, AH,
+//! OQ, TL, B1, F0), the rendered level in dB, then the formants and the
+//! remaining amplitudes (F1-F3, B2-B3, AVS, AF, AB, FNZ, A2-A6).
 use klatter::*;
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
@@ -102,11 +102,16 @@ fn run(input: &str, render: Option<(f64, &str)>) -> io::Result<()> {
     out.flush()
 }
 
-/// Per-frame source parameters and rendered level, at the natural rate or
-/// `scale` times its durations, with the segment each frame belongs to.
+/// Per-frame parameters and rendered level, at the natural rate or `scale`
+/// times its durations, with the segment and word each frame belongs to.
 fn run_frames(input: &str, scale: f64) -> io::Result<()> {
     let text = std::fs::read_to_string(input)?;
-    let mut segs = utterance::build(&text::normalize(&text));
+    let tokens = text::normalize(&text);
+    let mut words = tokens.iter().filter_map(|t| match t {
+        text::Token::Word(w) => Some(w.as_str()),
+        _ => None,
+    });
+    let mut segs = utterance::build(&tokens);
     prosody::assign_durations(&mut segs);
     prosody::scale_durations(&mut segs, scale);
     let (starts, lens) = params::frame_layout(&segs);
@@ -116,10 +121,18 @@ fn run_frames(input: &str, scale: f64) -> io::Result<()> {
     let mut out = BufWriter::new(io::stdout().lock());
     writeln!(
         out,
-        "seg\tph\tstress\tfn\tfinal\tk\tlen\tav\tah\toq\ttl\tb1\tf0\tdb"
+        "seg\tph\tstress\tfn\tfinal\tk\tlen\tav\tah\toq\ttl\tb1\tf0\tdb\t\
+         word\twi\twf\tcoda\tsyl\tnsyl\tflap\tasp_ms\ttin_ms\ttout_ms\t\
+         f1\tf2\tf3\tb2\tb3\tavs\taf\tab\tfnz\ta2\ta3\ta4\ta5\ta6"
     )?;
+    let mut word = "";
     for (i, seg) in segs.iter().enumerate() {
         let name = seg.ph.map_or("_", |p| p.name());
+        if seg.ph.is_none() {
+            word = "";
+        } else if seg.word_initial {
+            word = words.next().unwrap_or("?");
+        }
         for k in 0..lens[i] {
             let frame = starts[i] + k;
             let a = klatt::Synth::frame_start(frame, rate).min(audio.len());
@@ -128,7 +141,10 @@ fn run_frames(input: &str, scale: f64) -> io::Result<()> {
             let fr = &frames[frame];
             writeln!(
                 out,
-                "{i}\t{name}\t{}\t{}\t{}\t{k}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.0}\t{:.1}\t{:.2}",
+                "{i}\t{name}\t{}\t{}\t{}\t{k}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.0}\t{:.1}\t{:.2}\t\
+                 {word}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.1}\t\
+                 {:.0}\t{:.0}\t{:.0}\t{:.0}\t{:.0}\t{:.1}\t{:.1}\t{:.1}\t{:.0}\t\
+                 {:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
                 seg.stress,
                 seg.function_word as u8,
                 seg.phrase_final as u8,
@@ -140,6 +156,29 @@ fn run_frames(input: &str, scale: f64) -> io::Result<()> {
                 fr.b[0],
                 fr.f0,
                 10.0 * (power + 1e-12).log10(),
+                seg.word_initial as u8,
+                seg.word_final as u8,
+                seg.coda as u8,
+                seg.syllable,
+                seg.syllables_in_word,
+                seg.flap as u8,
+                seg.aspiration_ms,
+                seg.trans_in_ms,
+                seg.trans_out_ms,
+                fr.f[0],
+                fr.f[1],
+                fr.f[2],
+                fr.b[1],
+                fr.b[2],
+                fr.avs,
+                fr.af,
+                fr.ab,
+                fr.fnz,
+                fr.a[0],
+                fr.a[1],
+                fr.a[2],
+                fr.a[3],
+                fr.a[4],
             )?;
         }
     }

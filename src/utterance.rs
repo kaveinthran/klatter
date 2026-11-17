@@ -44,6 +44,8 @@ pub struct Seg {
     /// span is the phone's steady state (see `timing`).
     pub trans_in_ms: f64,
     pub trans_out_ms: f64,
+    /// Duration of a diphthong's interior transition (see `timing`).
+    pub glide_ms: f64,
     /// A /t/ or /d/ realized as an alveolar flap; `ph` keeps the phoneme so
     /// the vowel before it keeps its voicing-dependent length.
     pub flap: bool,
@@ -66,6 +68,7 @@ impl Seg {
             aspiration_ms: 0.0,
             trans_in_ms: 0.0,
             trans_out_ms: 0.0,
+            glide_ms: 0.0,
             flap: false,
         }
     }
@@ -193,15 +196,31 @@ fn connected_form(word: &str, mut phones: Vec<(Ph, u8)>, next: Option<Ph>) -> Ve
         };
         return weak.map_or(phones, <[(Ph, u8)]>::to_vec);
     }
-    reduce_unstressed(&mut phones);
+    let keep = stem_final_schwa(word, &phones);
+    reduce_unstressed(&mut phones, keep);
     phones
 }
 
-/// American English has two reduced vowels (Flemming & Johnson 2007): a high
-/// central [ɨ] (IX) between consonants, as in "rabbit" and "roses", and [ə]
-/// (AX) at word edges, after vowels and before syllabic /l/ ("about",
-/// "little"). Unstressed /ɪ/ reduces to [ɨ] too, except in "-ing".
-fn reduce_unstressed(phones: &mut [(Ph, u8)]) {
+/// A word-final unstressed vowel keeps its quality when a plural or
+/// possessive suffix is added (Flemming & Johnson 2007), so "Rosa's" and
+/// "sofas" keep the [ə] of "Rosa" and "sofa" while "roses" has [ɨ]. Returns
+/// the index of such a stem-final schwa.
+fn stem_final_schwa(word: &str, phones: &[(Ph, u8)]) -> Option<usize> {
+    let stem = word.strip_suffix("'S").or_else(|| word.strip_suffix('S'))?;
+    let n = phones.len();
+    let schwa = n.checked_sub(2)?;
+    let suffixed = matches!(phones[n - 1].0, Ph::S | Ph::Z) && phones[schwa] == (Ph::AX, 0);
+    let stem_schwa = lexicon::cmudict_phones(stem).is_some_and(|p| p.last() == Some(&(Ph::AX, 0)));
+    (suffixed && stem_schwa).then_some(schwa)
+}
+
+/// American English has two reduced vowels (Flemming & Johnson 2007): [ə]
+/// (AX) word-finally, where a plural or possessive suffix leaves it intact,
+/// and a high central [ɨ] (IX) elsewhere, as in "rabbit" and "roses". Klatter
+/// keeps [ə] next to a vowel, at word edges and before /l/ ("about",
+/// "little"), and reduces unstressed /ɪ/ to [ɨ] except in "-ing". `keep` is a
+/// stem-final schwa to leave as it is.
+fn reduce_unstressed(phones: &mut [(Ph, u8)], keep: Option<usize>) {
     let consonant = |j: Option<usize>| {
         j.and_then(|j| phones.get(j))
             .is_some_and(|p| !p.0.is_vowel())
@@ -210,6 +229,7 @@ fn reduce_unstressed(phones: &mut [(Ph, u8)]) {
         .map(|i| {
             let next = phones.get(i + 1).map(|p| p.0);
             phones[i].1 == 0
+                && keep != Some(i)
                 && match phones[i].0 {
                     Ph::IH => next != Some(Ph::NG),
                     Ph::AX => {
@@ -410,6 +430,7 @@ pub(crate) fn build_plan_cancellable(
                         aspiration_ms: 0.0,
                         trans_in_ms: 0.0,
                         trans_out_ms: 0.0,
+                        glide_ms: 0.0,
                         flap: false,
                     });
                 }
@@ -609,6 +630,8 @@ mod tests {
     fn unstressed_vowels_reduce_by_position() {
         assert_eq!(realized("rabbit"), "R AE B IX T");
         assert_eq!(realized("roses"), "R OW Z IX Z");
+        assert_eq!(realized("Rosa's"), "R OW Z AX Z");
+        assert_eq!(realized("sofas"), "S OW F AX Z");
         assert_eq!(realized("about"), "AX B AW T");
         assert_eq!(realized("little"), "L IH DX AX L");
         assert_eq!(realized("sitting"), "S IH DX IH NG");

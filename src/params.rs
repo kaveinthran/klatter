@@ -10,11 +10,17 @@ const ASPIRATION_DB: f64 = 55.0;
 const VOICE_BAR_DB: f64 = 47.0;
 /// Keeps short frication and release cues prominent relative to vowels.
 const CONSONANT_NOISE_BOOST_DB: f64 = 6.0;
-/// Eloquence's /h/ is mostly voiced, with noise on top, rather than pure noise.
-const HH_AV_DB: f64 = 52.0;
-const HH_AH_DB: f64 = 55.0;
-/// Eloquence moves between sounds over about 25 ms; switching voicing or
-/// frication within one 5 ms frame sounds like clips spliced together.
+/// /h/ is voiced with noise on top rather than pure noise: between voiced
+/// sounds English /h/ is usually breathy-voiced [ɦ] (Ladefoged & Johnson
+/// 2011). Its voicing is 10 dB below a vowel's, Klatt's (1980) level for
+/// sonorant consonants, under the usual aspiration.
+const HH_AV_DB: f64 = crate::phoneme::VOWEL_AV - 10.0;
+const HH_AH_DB: f64 = ASPIRATION_DB;
+/// Voicing and frication change across a boundary rather than within one
+/// 5 ms parameter update, which sounds like clips spliced together. The ramp
+/// spans the nearest symmetric number of frames, 25 ms, to Hertz's (1991,
+/// Fig. 7) 30 ms fricative-to-vowel transition, across which frication gives
+/// way to voicing.
 const CROSS_FADE_FRAMES: usize = 5;
 /// Fades run from this inaudible level so they span only the audible range.
 const FADE_FLOOR_DB: f64 = 30.0;
@@ -26,14 +32,10 @@ const NASALIZE_AFTER_MS: f64 = 30.0;
 /// Affricates need most of their time as frication, or CH is heard as T.
 const AFFRICATE_RELEASE_SHARE: f64 = 0.65;
 
-/// KLGLOTT88 source settings for a male voice: modal phonation, then the fully
-/// breathy values (Klatt & Klatt 1990, Sec. III B and Table XII). Eloquence's
-/// corrected H1*-H2* is about +1.3 dB at every rate; the modal open quotient
-/// falls between the values that match it in sustained vowels (56%) and at a
-/// normal rate (50%), where breathiness ramps fill more of each vowel. Up to
-/// 56%, it leaves the source's energy above 500 Hz unchanged relative to its
-/// 250-500 Hz band.
-const MODAL_OQ: f64 = 54.0;
+/// KLGLOTT88 source settings for a male voice: modal phonation at the
+/// synthesizer's default open quotient, then the fully breathy values (Klatt &
+/// Klatt 1990, Table XII and Sec. III A).
+const MODAL_OQ: f64 = 50.0;
 const BREATHY_OQ: f64 = 80.0;
 const BREATHY_TL: f64 = 20.0;
 const BREATHY_AH: f64 = 52.0;
@@ -54,33 +56,37 @@ const VOICELESS_MARGIN_SHARE: f64 = 1.0 / 3.0;
 /// Stressed syllables are spoken with more vocal effort and are more intense
 /// (Fry 1955; Lehiste 1970). Klatt & Klatt's (1990) male talkers' stressed
 /// syllables were 4.3 dB more intense at mid-vowel, partly from their higher
-/// F0, which the pitch contour already supplies. Klatt (1987) found a large
-/// stress-intensity rule makes stressed vowels sound artificially strong, so
-/// the rest of the difference is taken from unstressed vowels, modestly.
+/// F0, which the pitch contour already supplies. Klatt (1987) notes that F0
+/// alone raises the intensity of stressed vowels and that a specific rule to
+/// increase their intensity made them sound artificially strong. Klatter
+/// instead takes a modest part of the difference from unstressed vowels,
+/// which a listener preferred in blind comparison.
 const UNSTRESSED_AV_DROP_DB: f64 = 3.0;
 
 fn ms(x: f64) -> usize {
     (x / FRAME_MS).round() as usize
 }
 
-/// AY, AW and OY timing, fitted to Eloquence's formant tracks with both
-/// engines' vowels measured from voicing onset to acoustic offset: the glide
-/// takes about 55 ms and reaches the offglide just before the consonant, and
-/// the onset vowel takes the rest (at least 30% of the vowel after the
-/// incoming transition). A long held offglide closes them early and leaves
-/// the open onset barely heard.
-const DIPHTHONG_GLIDE_MS: f64 = 55.0;
+/// AY, AW and OY are an onset vowel and an offglide joined by an interior
+/// transition (Hertz, Younes & Zinovieva 1999), timed like a vowel-vowel
+/// transition (Hertz 1991, Figs. 6-9) and stable before voiced and voiceless
+/// consonants alike: the onset vowel absorbs the change (pp. 99-100). The
+/// offglide holds for 10 ms before the next transition (Hertz & Huffman 1992,
+/// p. 1171). When the vowel is too short, the onset keeps a third of it and
+/// the glide is cut off short of the offglide, as in Hertz's fast [said],
+/// whose [a] keeps 35 ms and whose interior transition stops after 70 of its
+/// 100 ms (1991, Fig. 17, p. 106): the glide keeps its slope where the vowel
+/// leaves room for 70% of it, and steepens where it does not, so it always
+/// gets that far.
 const DIPHTHONG_OFFGLIDE_MS: f64 = 10.0;
-const MIN_ONSET: f64 = 0.3;
-/// Glide (start, end) as fractions of a diphthong before a voiceless
-/// obstruent, where Eloquence's diphthongs are short and glide early.
-const CLIPPED_GLIDE: (f64, f64) = (0.25, 0.8);
+const MIN_ONSET: f64 = 1.0 / 3.0;
+const MIN_GLIDE_REACHED: f64 = 0.7;
 /// Velar closures are made wherever the tongue body sits for the vowel, so
-/// the velar F2 locus follows the vowel's F2 (a locus equation) instead of
-/// one fixed value. Fitted to Eloquence, whose velar loci are near 2,100 Hz
-/// beside IY but 1,200 to 1,700 Hz beside back vowels.
-const VELAR_LOCUS_BASE_HZ: f64 = 680.0;
-const VELAR_LOCUS_SLOPE: f64 = 0.71;
+/// the velar F2 locus follows the vowel's F2 instead of one fixed value: the
+/// locus equation for /g/ onsets of Sussman, McCaffrey & Matthews' (1991,
+/// Table I) male talkers, F2 onset = 0.66 F2 vowel + 807 Hz.
+const VELAR_LOCUS_BASE_HZ: f64 = 807.0;
+const VELAR_LOCUS_SLOPE: f64 = 0.66;
 
 /// F2 locus of the velar stop at `i`, from the vowel it releases into, or
 /// else the vowel before it.
@@ -103,8 +109,34 @@ fn velar_f2_locus(segs: &[Seg], i: usize) -> Option<f64> {
     Some(VELAR_LOCUS_BASE_HZ + VELAR_LOCUS_SLOPE * f2)
 }
 
-fn is_obstruent(p: Ph) -> bool {
-    matches!(p.class(), Class::Stop | Class::Affricate | Class::Fricative)
+/// Klatt's (1980) labial and alveolar stop F2 and F3 targets are virtual
+/// loci: at the release the formants lie between the locus and the vowel.
+/// A fixed onset (a "hub") makes listeners hear the wrong consonant before
+/// some vowels (Delattre et al. 1955, in Klatt 1987, Fig. 16), so the stop
+/// takes the point `k` of the way from its locus to the vowel it releases
+/// into, or else the vowel before it, with Delattre's and Holmes's k of 0.5
+/// (Klatt 1987, note 4).
+const LOCUS_K: f64 = 0.5;
+
+/// F2 and F3 at the labial or alveolar stop at `i`, from its virtual loci.
+fn stop_f2_f3(segs: &[Seg], i: usize) -> Option<[f64; 2]> {
+    let ph = segs[i].ph?;
+    if ph.class() != Class::Stop || !matches!(ph.place(), Place::Labial | Place::Alveolar) {
+        return None;
+    }
+    let vowel = |j: usize| {
+        segs.get(j)
+            .and_then(|s| s.ph)
+            .filter(|p| p.is_vowel())
+            .map(Ph::spec)
+    };
+    let v = vowel(i + 1).map(|s| s.f).or_else(|| {
+        i.checked_sub(1)
+            .and_then(vowel)
+            .map(|s| s.f_end.unwrap_or(s.f))
+    })?;
+    let locus = ph.spec().f;
+    Some([1, 2].map(|j| lerp(locus[j], v[j], LOCUS_K)))
 }
 
 /// (frames before, frames after) each boundary: the transition between the
@@ -158,39 +190,34 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
 
 /// Per-frame formant targets of a segment, before coarticulation. `incoming`
 /// frames at its start are covered by the transition from the segment
-/// before, and `clipped` marks a vowel before a voiceless obstruent.
-fn targets(ph: Ph, len: usize, incoming: usize, clipped: bool) -> Vec<Formants> {
+/// before, and a diphthong glides for `glide_ms`.
+fn targets(ph: Ph, len: usize, incoming: usize, glide_ms: f64) -> Vec<Formants> {
     let spec = ph.spec();
     let frames = |ms: f64| ms / FRAME_MS;
-    // Hertz, Younes & Zinovieva (1999): AY, AW and OY are vowel plus glide.
-    // Eloquence holds the onset vowel from the end of the transition into it
-    // and glides in a roughly fixed time just before the next consonant, so
-    // the open onset of "time" or "down" is heard. Before a voiceless
-    // obstruent the whole vowel is clipped and it glides from early on.
-    // EY and OW glide throughout.
+    // AY, AW and OY hold the onset vowel from the end of the transition into
+    // it and glide just before the next consonant, so the open onset of
+    // "time" or "down" is heard. EY and OW glide throughout.
     let settled = incoming.min(len / 2) as f64;
     let span = len as f64 - settled;
     let (glide_start, glide_len) = match ph {
-        Ph::AY | Ph::AW | Ph::OY if clipped => (
-            CLIPPED_GLIDE.0 * len as f64,
-            (CLIPPED_GLIDE.1 - CLIPPED_GLIDE.0) * len as f64,
-        ),
-        Ph::AY | Ph::AW | Ph::OY
-            if span >= frames(DIPHTHONG_GLIDE_MS + DIPHTHONG_OFFGLIDE_MS) + MIN_ONSET * span =>
-        {
-            let glide = frames(DIPHTHONG_GLIDE_MS);
-            (len as f64 - frames(DIPHTHONG_OFFGLIDE_MS) - glide, glide)
+        Ph::AY | Ph::AW | Ph::OY => {
+            let earliest = settled + MIN_ONSET * span;
+            let glide = frames(glide_ms)
+                .min((len as f64 - 1.0 - earliest) / MIN_GLIDE_REACHED)
+                .max(1.0);
+            let start = len as f64 - frames(DIPHTHONG_OFFGLIDE_MS) - glide;
+            (start.max(earliest), glide)
         }
-        Ph::AY | Ph::AW | Ph::OY => (settled + MIN_ONSET * span, 0.6 * span),
         _ => (0.25 * len as f64, 0.6 * len as f64),
     };
     (0..len)
         .map(|k| match spec.f_end {
             Some(end) => {
                 let t = ((k as f64 - glide_start) / glide_len.max(1.0)).clamp(0.0, 1.0);
+                let f = std::array::from_fn(|j| lerp(spec.f[j], end[j], t));
                 Formants {
-                    f: std::array::from_fn(|j| lerp(spec.f[j], end[j], t)),
-                    b: spec.b,
+                    f,
+                    b: crate::phoneme::vowel_bandwidths(f),
                 }
             }
             None => Formants {
@@ -249,15 +276,17 @@ fn formant_tracks(
             0
         };
         let incoming = if i > 0 { windows[i - 1].1 } else { 0 };
-        let clipped = segs
-            .get(i + 1)
-            .and_then(|s| s.ph)
-            .is_some_and(|p| is_obstruent(p) && !p.is_voiced());
-        let mut t = targets(ph, lens[i] - outgoing, incoming, clipped);
+        let mut t = targets(ph, lens[i] - outgoing, incoming, segs[i].glide_ms);
         t.resize(lens[i], *t.last().unwrap());
         if let Some(f2) = velar_f2_locus(segs, i) {
             for f in &mut t {
                 f.f[1] = f2;
+            }
+        }
+        if let Some([f2, f3]) = stop_f2_f3(segs, i) {
+            for f in &mut t {
+                f.f[1] = f2;
+                f.f[2] = f3;
             }
         }
         if segs[i].ph == Some(Ph::HH) {
@@ -314,19 +343,29 @@ fn is_voiceless(s: Option<&Seg>) -> bool {
 }
 
 /// Per-frame (breathiness, offset) for a sonorant: breathiness 0 is modal and
-/// 1 fully breathy; offset rises from 0 to 1 over a vowel ending in silence.
+/// 1 fully breathy; offset rises from 0 to 1 over the end of voicing before
+/// silence.
 /// Klatt & Klatt (1990) found breathiness rises toward vowel offsets into
 /// silence and near voiceless consonants, and is greater in sentence-final
 /// syllables. Their male talkers' first harmonic at mid-vowel was no
 /// stronger in unstressed syllables than in stressed ones (Table II), and
-/// their vowels showed little aspiration noise (Tables V and VI), so for
+/// their vowels' noise ratings were low, if somewhat higher in unstressed
+/// syllables (Tables V and VI), so for
 /// this male voice unstressed syllables keep modal phonation; Klatt's (1987)
 /// rules likewise kept breathiness for utterance offsets.
-fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64, f64)> {
+fn breathiness(segs: &[Seg], lens: &[usize], i: usize, time_scale: f64) -> Vec<(f64, f64)> {
     let s = &segs[i];
+    let len = lens[i];
     let prev = i.checked_sub(1).map(|j| &segs[j]);
     let next = segs.get(i + 1);
-    let before_silence = segs.get(i + 1).is_none_or(|n| n.ph.is_none());
+    // Klatt & Klatt's (1990, Fig. 15) offset ramp spans the last stretch of
+    // voicing, so it starts in the vowel before a short final sonorant such
+    // as the /l/ of "table" instead of starting halfway at the /l/.
+    let run_end = (i + 1..segs.len())
+        .find(|&j| !segs[j].ph.is_some_and(Ph::is_sonorant))
+        .unwrap_or(segs.len());
+    let before_silence = segs.get(run_end).is_none_or(|n| n.ph.is_none());
+    let tail: usize = lens[i + 1..run_end].iter().sum();
     let frames = |ms: f64| (ms * time_scale / FRAME_MS).max(1.0);
     // A breathy onset after a voiceless plosive starts where voicing does,
     // after the aspiration.
@@ -342,7 +381,8 @@ fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64,
             let mut b = floor;
             let mut offset = 0.0;
             if before_silence {
-                offset = (1.0 - from_end / frames(OFFSET_RAMP_MS)).max(0.0);
+                let to_silence = from_end + tail as f64;
+                offset = (1.0 - to_silence / frames(OFFSET_RAMP_MS)).max(0.0);
                 b = b.max(offset);
             } else if is_voiceless(next) {
                 b = b.max(VOICELESS_PEAK * (1.0 - from_end / margin));
@@ -356,7 +396,7 @@ fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64,
         .collect()
 }
 
-/// Applies breathy phonation (Klatt & Klatt 1990, Sec. III B steps 5 and 6):
+/// Applies breathy phonation (Klatt & Klatt 1990, Sec. III A steps 4 to 6):
 /// a higher open quotient strengthens the first harmonic, spectral tilt
 /// weakens the upper harmonics, aspiration noise replaces them, and glottal
 /// losses widen B1 and B2.
@@ -468,9 +508,12 @@ pub(crate) fn build_frames_cancellable(
                 let closure = len - release;
                 for (k, fr) in frames[range].iter_mut().enumerate() {
                     if k < closure {
-                        // Even voiceless closures carry a low murmur so
-                        // phrases flow without dead gaps, matching Eloquence.
-                        fr.avs = VOICE_BAR_DB;
+                        // Only voiced closures carry a voice bar (Klatt
+                        // 1980); voicing stops for a voiceless one (Hertz
+                        // 1991).
+                        if ph.is_voiced() {
+                            fr.avs = VOICE_BAR_DB;
+                        }
                     } else {
                         fr.av = spec.av;
                         fr.af = noise_level(spec.af);
@@ -486,12 +529,50 @@ pub(crate) fn build_frames_cancellable(
     }
 
     cross_fade(segs, starts, lens, &mut frames);
+    // Voicing stops for a voiceless plosive or affricate (Hertz 1991, Figs.
+    // 14-15, turns it off before the closure) and starts again only after the
+    // burst and any aspiration, which is what voice-onset time measures
+    // (Klatt 1987), so the cross-fade must not carry the vowels' voicing into
+    // its closure or release: voicing fades within the vowel before it.
+    let half = CROSS_FADE_FRAMES / 2;
+    for i in 0..segs.len() {
+        let voiceless_stop = segs[i]
+            .ph
+            .is_some_and(|p| matches!(p.class(), Class::Stop | Class::Affricate) && !p.is_voiced());
+        if segs[i].flap || !voiceless_stop {
+            continue;
+        }
+        for fr in &mut frames[starts[i]..starts[i] + lens[i]] {
+            fr.av = 0.0;
+        }
+        let Some(from) = starts[i].checked_sub(half + 1) else {
+            continue;
+        };
+        let level = frames[from].av;
+        if level > 0.0 {
+            for d in 1..=half {
+                let fade = lerp(FADE_FLOOR_DB, level, d as f64 / (half + 1) as f64);
+                let fr = &mut frames[starts[i] - d];
+                fr.av = fr.av.min(fade);
+            }
+        }
+    }
+    // A flap is a brief tap of the tongue tip (Zue & Laferriere 1979), heard
+    // as a short dip in voicing. Averaged with the vowels around it, a one-
+    // or two-frame tap at fast rates lost all but 1-2 dB of its dip, so its
+    // own frames keep the voiced-closure level after the cross-fade.
+    for i in 0..segs.len() {
+        if segs[i].flap {
+            for fr in &mut frames[starts[i]..starts[i] + lens[i]] {
+                fr.av = fr.av.min(VOICE_BAR_DB);
+            }
+        }
+    }
     nasalize_vowels(segs, starts, lens, &mut frames);
     if cancelled() {
         return None;
     }
 
-    let half = CROSS_FADE_FRAMES / 2;
     // Aspiration replaces voicing at the start of the sonorant after a
     // voiceless plosive, which is how voice-onset time is realized.
     for i in 0..segs.len().saturating_sub(1) {
@@ -509,10 +590,10 @@ pub(crate) fn build_frames_cancellable(
         }
         // The folds adduct gradually after aspiration (Lofqvist & McGowan
         // 1992), so voicing grows over the same cross-fade as other onsets
-        // rather than switching on at full strength.
+        // rather than switching on at full strength, continuing into the
+        // next phone when aspiration leaves a short sonorant little voicing.
         let onset = starts[i + 1] + n;
-        let end = starts[i + 1] + lens[i + 1];
-        for (d, fr) in frames[onset..end].iter_mut().take(half).enumerate() {
+        for (d, fr) in frames[onset..].iter_mut().take(half).enumerate() {
             if fr.av > 0.0 {
                 let voiced = (half + 1 + d) as f64 / CROSS_FADE_FRAMES as f64;
                 fr.av = lerp(FADE_FLOOR_DB, fr.av, voiced);
@@ -527,7 +608,7 @@ pub(crate) fn build_frames_cancellable(
         if !segs[i].ph.is_some_and(Ph::is_sonorant) {
             continue;
         }
-        let b = breathiness(segs, i, lens[i], time_scale);
+        let b = breathiness(segs, lens, i, time_scale);
         for (fr, b) in frames[starts[i]..starts[i] + lens[i]].iter_mut().zip(b) {
             if fr.av > 0.0 {
                 apply_voice_quality(fr, b.0, b.1);
@@ -773,6 +854,58 @@ mod tests {
     }
 
     #[test]
+    fn voiceless_plosive_bursts_are_unvoiced_at_every_rate() {
+        for text in ["a tea", "a stay", "pick it up", "to cut"] {
+            for scale in [1.0, 0.5, 0.38] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames_with_time_scale(&segs, &starts, &lens, scale);
+                for i in 0..segs.len() {
+                    if segs[i].flap || !segs[i].ph.is_some_and(|p| p.is_plosive() && !p.is_voiced())
+                    {
+                        continue;
+                    }
+                    let burst = frames[starts[i]..starts[i] + lens[i]]
+                        .iter()
+                        .filter(|f| f.af > 0.0);
+                    assert!(
+                        burst.clone().count() > 0 && burst.clone().all(|f| f.av == 0.0),
+                        "{text}, scale {scale}: {:?}",
+                        segs[i].ph
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flaps_dip_in_voicing_at_every_rate() {
+        for text in ["water", "a city", "get up"] {
+            for scale in [1.0, 0.5, 0.38] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames_with_time_scale(&segs, &starts, &lens, scale);
+                let flap = segs.iter().position(|s| s.flap).unwrap();
+                let peak = |i: usize| {
+                    frames[starts[i]..starts[i] + lens[i]]
+                        .iter()
+                        .map(|f| f.av)
+                        .fold(0.0, f64::max)
+                };
+                let tap = &frames[starts[flap]..starts[flap] + lens[flap]];
+                let dip = peak(flap - 1).min(peak(flap + 1))
+                    - tap.iter().map(|f| f.av).fold(f64::MAX, f64::min);
+                assert!(dip >= 6.0, "{text}, scale {scale}: dip {dip}");
+                assert!(tap.iter().all(|f| f.av > 0.0));
+            }
+        }
+    }
+
+    #[test]
     fn flap_stays_voiced_without_burst_and_is_shorter_than_a_stop() {
         let (segs, starts, lens, frames) = frames_for("water");
         let flap = segs.iter().position(|s| s.flap).unwrap();
@@ -843,8 +976,8 @@ mod tests {
             s.dur_ms = 180.0;
         }
         let vowel = segs.iter().position(|s| s.ph == Some(Ph::IY)).unwrap();
-        let natural = breathiness(&segs, vowel, 36, 1.0);
-        let fast = breathiness(&segs, vowel, 12, 1.0 / 3.0);
+        let natural = breathiness(&segs, &vec![36; segs.len()], vowel, 1.0);
+        let fast = breathiness(&segs, &vec![12; segs.len()], vowel, 1.0 / 3.0);
         for (k, &(b, offset)) in fast.iter().enumerate() {
             let corresponding = natural[k * 3];
             assert!((b - corresponding.0).abs() < 1e-12, "frame {k}: {b}");
@@ -925,13 +1058,13 @@ mod tests {
 
     #[test]
     fn diphthongs_hold_their_onset_then_glide_just_before_closure() {
-        for (text, ph) in [("five", Ph::AY), ("loud", Ph::AW), ("noise", Ph::OY)] {
+        for (text, ph) in [("five", Ph::AY), ("cows", Ph::AW), ("noise", Ph::OY)] {
             let (segs, starts, lens, frames) = frames_for(text);
             let vowel = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
             let windows = transition_windows(&segs, &lens);
             let closure = starts[vowel] + lens[vowel] - windows[vowel].0;
             let offglide = closure - ms(DIPHTHONG_OFFGLIDE_MS);
-            let glide = offglide - ms(DIPHTHONG_GLIDE_MS);
+            let glide = offglide - ms(segs[vowel].glide_ms);
             let spec = ph.spec();
             let target = spec.f_end.unwrap();
             // The onset is held from the end of the incoming transition.
@@ -945,7 +1078,7 @@ mod tests {
                     lerp(
                         spec.f[j],
                         target[j],
-                        k as f64 / ms(DIPHTHONG_GLIDE_MS) as f64,
+                        k as f64 / ms(segs[vowel].glide_ms) as f64,
                     )
                 });
                 assert_eq!(fr.f, expected, "{text}: glide frame {k}");
@@ -958,7 +1091,27 @@ mod tests {
     }
 
     #[test]
-    fn diphthongs_glide_early_before_voiceless_obstruents() {
+    fn diphthongs_reach_most_of_their_offglide_in_fast_speech() {
+        for (text, ph) in [("five", Ph::AY), ("boy", Ph::OY), ("go down", Ph::AW)] {
+            for scale in [1.0, 0.45] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                crate::prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames(&segs);
+                let v = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
+                let (from, to) = (ph.spec().f[1], ph.spec().f_end.unwrap()[1]);
+                let reached = frames[starts[v]..starts[v] + lens[v]]
+                    .iter()
+                    .map(|f| (f.f[1] - from) / (to - from))
+                    .fold(f64::MIN, f64::max);
+                assert!(reached > 0.69, "{text} at {scale}: {reached}");
+            }
+        }
+    }
+
+    #[test]
+    fn diphthong_onsets_absorb_clipping_before_voiceless_obstruents() {
         let onset_share = |text: &str| {
             let (segs, starts, lens, frames) = frames_for(text);
             let vowel = segs.iter().position(|s| s.ph == Some(Ph::AY)).unwrap();
@@ -972,6 +1125,34 @@ mod tests {
     }
 
     #[test]
+    fn breathy_offset_spans_a_short_final_sonorant_and_its_vowel() {
+        for text in ["table.", "the weather is terrible.", "again."] {
+            for scale in [1.0, 0.5] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames_with_time_scale(&segs, &starts, &lens, scale);
+                let last = segs.iter().rposition(|s| s.ph.is_some()).unwrap();
+                assert!(
+                    !segs[last].is_vowel() && segs[last - 1].is_vowel(),
+                    "{text}"
+                );
+                let (a, b) = (frames[starts[last] - 1], frames[starts[last]]);
+                assert!(a.oq > MODAL_OQ + 6.5, "{text}, scale {scale}: {}", a.oq);
+                assert!(
+                    (a.av - b.av).abs() < 3.0 && (b.oq - a.oq).abs() < 4.0,
+                    "{text}, scale {scale}: av {} -> {}, oq {} -> {}",
+                    a.av,
+                    b.av,
+                    a.oq,
+                    b.oq
+                );
+            }
+        }
+    }
+
+    #[test]
     fn vowel_becomes_breathy_before_silence() {
         let (segs, starts, lens, frames) = frames_for("saw");
         let vowel = segs.iter().position(|s| s.ph == Some(Ph::AO)).unwrap();
@@ -979,6 +1160,32 @@ mod tests {
         let last = frames[starts[vowel] + lens[vowel] - 1];
         assert!(last.oq > mid.oq && last.tl > mid.tl && last.ah > mid.ah);
         assert!(last.av > 0.0);
+    }
+
+    #[test]
+    fn voicing_keeps_growing_after_aspiration_fills_a_short_sonorant() {
+        for text in ["likely", "country", "quick", "try"] {
+            for scale in [1.0, 0.5, 0.38] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames_with_time_scale(&segs, &starts, &lens, scale);
+                for i in 1..segs.len() {
+                    if segs[i].aspiration_ms == 0.0 {
+                        continue;
+                    }
+                    let onset = starts[i] + ms(segs[i].aspiration_ms).min(lens[i] - 1);
+                    let av: Vec<f64> = frames[onset..(onset + 4).min(frames.len())]
+                        .iter()
+                        .map(|f| f.av)
+                        .collect();
+                    for w in av.windows(2) {
+                        assert!(w[1] - w[0] < 7.0, "{text}, scale {scale}: {av:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1052,6 +1259,23 @@ mod tests {
     }
 
     #[test]
+    fn labial_and_alveolar_stops_start_between_locus_and_vowel() {
+        let onset = |text: &str, ph: Ph| {
+            let (segs, starts, lens, frames) = frames_for(text);
+            let i = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
+            frames[starts[i] + lens[i] - 1].f[1]
+        };
+        for ph in [Ph::D, Ph::B] {
+            let name = ph.name().to_lowercase();
+            let (front, back) = (
+                onset(&format!("a {name}ee"), ph),
+                onset(&format!("a {name}oo"), ph),
+            );
+            assert!(front > back + 300.0, "{ph:?}: {front} {back}");
+        }
+    }
+
+    #[test]
     fn velar_locus_follows_the_vowel() {
         let locus = |text: &str| {
             let (segs, starts, lens, frames) = frames_for(text);
@@ -1083,5 +1307,14 @@ mod tests {
         for w in f2.windows(2) {
             assert!((w[1] - w[0]).abs() < 300.0, "{f2:?}");
         }
+    }
+
+    #[test]
+    fn diphthong_bandwidths_follow_the_glide() {
+        let t = targets(Ph::AY, 40, 0, 100.0);
+        let (first, last) = (t[0], t[t.len() - 1]);
+        assert!(last.f[1] > first.f[1] + 500.0);
+        assert!(last.b[1] > first.b[1]);
+        assert_eq!(last.b, crate::phoneme::vowel_bandwidths(last.f));
     }
 }

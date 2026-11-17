@@ -29,15 +29,43 @@ pub use stream::{CancelHandle, Rendered, Utterance, WordEvent};
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
 /// Leaves PCM headroom for the voicing-presence and consonant-noise boosts.
-const GAIN: f64 = 156_000.0;
+const GAIN: f64 = 96_000.0;
 /// Keeps extreme pitch and inflection settings above the range where pulses become clicks.
 const MIN_F0: f64 = 30.0;
 
-/// Klatter's natural speaking rate in long readings, including pauses: 220
-/// WPM averaged over two readings, raised 3.7% because weak forms, flaps and
-/// the vowel durations fitted to Eloquence shorten readings of *Alice* and
-/// *Sherlock Holmes* by that much.
-pub const DEFAULT_WPM: f64 = 228.0;
+/// Klatter's natural speaking rate in long readings, including pauses,
+/// calibrated on *Alice's Adventures in Wonderland* so that a rate setting
+/// gives that many words per minute.
+pub const DEFAULT_WPM: f64 = 219.0;
+
+/// The share of that natural-rate reading spent in pauses, calibrated on the
+/// same text so that faster settings also give their words per minute
+/// although pauses shrink faster than speech (see `prosody::pause_scale`).
+const NATURAL_PAUSE_SHARE: f64 = 0.135;
+
+/// The phones' duration scale that gives `wpm` words per minute in running
+/// text. Slower than the natural rate, everything lengthens together; faster,
+/// the phones take the scale whose shortened phones and pauses together fit
+/// the time the rate allows.
+fn duration_scale(wpm: f64) -> f64 {
+    let time = DEFAULT_WPM / wpm;
+    if time >= 1.0 {
+        return time;
+    }
+    let reading_time = |scale: f64| {
+        (1.0 - NATURAL_PAUSE_SHARE) * scale + NATURAL_PAUSE_SHARE * prosody::pause_scale(scale)
+    };
+    let (mut lo, mut hi) = (0.0, 1.0);
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        if reading_time(mid) < time {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
 
 /// Speaking settings in physical units, so each host maps its own scales onto them.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -242,7 +270,7 @@ fn plan_tokens_cancellable(
     if cancelled() {
         return None;
     }
-    let scale = DEFAULT_WPM / voice.wpm;
+    let scale = duration_scale(voice.wpm);
     prosody::scale_durations(&mut segs, scale);
     if cancelled() {
         return None;
@@ -440,17 +468,26 @@ mod tests {
     #[test]
     fn rate_scales_duration() {
         let normal = synthesize_frames(SENTENCE).len() as f64;
-        for factor in [0.5, 2.0, 3.0] {
-            let len = frames(
-                SENTENCE,
-                Voice {
-                    wpm: DEFAULT_WPM * factor,
-                    ..Voice::default()
-                },
-            )
-            .len() as f64;
+        let voice = |factor: f64| Voice {
+            wpm: DEFAULT_WPM * factor,
+            ..Voice::default()
+        };
+        let slow = frames(SENTENCE, voice(0.5)).len() as f64;
+        assert!(
+            (slow * 0.5 / normal - 1.0).abs() < 0.1,
+            "{slow} vs {normal}"
+        );
+        // Faster, the phones take what the shrinking pauses leave, so running
+        // text keeps the rate while this sentence's phones follow their scale.
+        for factor in [2.0, 3.0] {
+            let scale = duration_scale(DEFAULT_WPM * factor);
+            assert!(scale > 1.0 / factor);
+            let reading = (1.0 - NATURAL_PAUSE_SHARE) * scale
+                + NATURAL_PAUSE_SHARE * prosody::pause_scale(scale);
+            assert!((reading * factor - 1.0).abs() < 1e-9);
+            let len = frames(SENTENCE, voice(factor)).len() as f64;
             assert!(
-                (len * factor / normal - 1.0).abs() < 0.1,
+                (len / normal / scale - 1.0).abs() < 0.1,
                 "{factor}: {len} vs {normal}"
             );
         }

@@ -13,10 +13,6 @@ import tempfile
 import wave
 from concurrent.futures import ThreadPoolExecutor
 
-# Eloquence is not included; JAWS installs it here. Set ECI_DLL to use another copy.
-ELOQUENCE_DLL = os.environ.get("ECI_DLL", r"C:\Program Files (x86)\Freedom Scientific\Shared\Eloquence\6.1\ECI.DLL")
-# ECI.DLL is 32-bit, so it must be loaded by a 32-bit process.
-POWERSHELL_X86 = r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
 PARALLEL = 8
 
 
@@ -87,46 +83,6 @@ $s.Dispose()
         _powershell("powershell", self.SCRIPT.replace("$VOICE", select), items, setting)
 
 
-class Eloquence:
-    """Eloquence 6.1 as shipped with JAWS, which only renders at 11,025 Hz."""
-    unit = "Eloquence wpm"
-    native = 176
-    bounds = (70, 1297)
-    integer = True
-    SCRIPT = r"""
-Add-Type @"
-using System; using System.Runtime.InteropServices;
-public static class Eci {
-  const string D = @"%DLL%";
-  [DllImport(D)] public static extern IntPtr eciNew();
-  [DllImport(D)] public static extern IntPtr eciDelete(IntPtr h);
-  [DllImport(D)] public static extern int eciSetParam(IntPtr h, int p, int v);
-  [DllImport(D)] public static extern int eciSetVoiceParam(IntPtr h, int voice, int p, int v);
-  [DllImport(D, CharSet=CharSet.Ansi)] public static extern int eciSetOutputFilename(IntPtr h, string f);
-  [DllImport(D, CharSet=CharSet.Ansi)] public static extern int eciAddText(IntPtr h, string t);
-  [DllImport(D)] public static extern int eciSynthesize(IntPtr h);
-  [DllImport(D)] public static extern int eciSynchronize(IntPtr h);
-}
-"@
-$h = [Eci]::eciNew()
-# Real-world units make the speed parameter words per minute.
-[void][Eci]::eciSetParam($h, 8, 1)
-[void][Eci]::eciSetVoiceParam($h, 0, 6, $SETTING)
-foreach ($j in (Get-Content -Raw -Encoding UTF8 $JOBS | ConvertFrom-Json)) {
-  # ECI appends to an existing file rather than replacing it.
-  Remove-Item -LiteralPath $j.wav -ErrorAction SilentlyContinue
-  [void][Eci]::eciSetOutputFilename($h, $j.wav)
-  # A backquote starts an Eloquence annotation.
-  [void][Eci]::eciAddText($h, $j.text.Replace('`', "'"))
-  [void][Eci]::eciSynthesize($h); [void][Eci]::eciSynchronize($h)
-}
-[void][Eci]::eciDelete($h)
-""".replace("%DLL%", ELOQUENCE_DLL)
-
-    def render(self, items, setting):
-        _powershell(POWERSHELL_X86, self.SCRIPT, items, setting)
-
-
 class Espeak:
     unit = "eSpeak wpm"
     native = 175
@@ -163,13 +119,11 @@ class Espeak:
 
 
 def parse(spec):
-    """An engine from "sapi", "sapi:Voice Name", "eloquence", "espeak" or a Klatter executable path."""
+    """An engine from "sapi", "sapi:Voice Name", "espeak" or a Klatter executable path."""
     # Commands pasted from formatted text can carry non-breaking spaces.
     spec = spec.strip()
     if spec == "sapi" or spec.startswith("sapi:"):
         return Sapi(spec[5:] or None)
-    if spec == "eloquence":
-        return Eloquence()
     if spec == "espeak":
         return Espeak()
     return Klatter(spec)

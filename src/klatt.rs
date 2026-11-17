@@ -30,20 +30,16 @@ const FT: f64 = 2150.0;
 const BT: f64 = 180.0;
 /// Frication-excited parallel bandwidths B2F..B6F.
 const PARALLEL_BW: [f64; 5] = [250.0, 320.0, 350.0, 500.0, 1500.0];
-/// Cascade formants above F3 at natural male spacing. F4 and F5 match the
-/// 3.6-3.9 kHz cluster of Eloquence's sustained vowels, with the valley below
-/// it. Poles up to and beyond the output band keep vowels' 3.5-5 kHz energy,
-/// which KLSYN88's 10 kHz-era F4/F5 alone lose at higher sample rates; the
-/// 4.7 kHz pole is broad so the cluster's upper skirt falls as steeply as
-/// Eloquence's.
-const CASCADE_HIGH: [(f64, f64); 4] = [
-    (3600.0, 300.0),
-    (3900.0, 200.0),
-    (4700.0, 1200.0),
-    (6000.0, 700.0),
-];
-/// Aspiration keeps KLSYN88's F4/F5 instead: through CASCADE_HIGH it hisses
-/// well above Eloquence's breath noise. Zeros cancel CASCADE_HIGH on the
+/// Cascade formants above F3: KLSYN88's default F4, F5 and F6 with their
+/// default bandwidths (Klatt & Klatt 1990, Table XII), which give the energy
+/// concentration around 3-3.5 kHz and the falloff above about 4 kHz typical of
+/// male talkers (Klatt 1980). KLSYN88 ran at 10 kHz, so F6 sat at the top of its
+/// band; at higher output rates one more pole, at the seventh resonance of a
+/// uniform 17.5 cm male vocal tract (Fant 1960), stands in for the resonances
+/// above F6 so vowels keep their 5-7 kHz energy.
+const CASCADE_HIGH: [(f64, f64); 4] = [(F4, 200.0), (F5, 200.0), (F6, 500.0), (6500.0, 1000.0)];
+/// Aspiration keeps KLSYN88's F4/F5 instead: through CASCADE_HIGH it hisses.
+/// Zeros cancel CASCADE_HIGH on the
 /// noise path because those poles must come last: ahead of the nasal and F1-F3
 /// filters, their boosted highs make the nasal zero click when it switches.
 const ASPIRATION_HIGH: [(f64, f64); 2] = [(F4, 200.0), (F5, 200.0)];
@@ -54,12 +50,15 @@ const OVERSAMPLE: usize = 4;
 const DECIMATION_TAPS: usize = 64;
 
 const CASCADE_GAIN: f64 = 1.0;
-/// Peak glottal flow at AV = 60 dB and F0 = 100 Hz. The paper scales the peak
-/// by the period (AV x T0) so the closure excitation is independent of F0.
+/// Peak glottal flow at AV = 60 dB and F0 = 100 Hz. The peak is scaled by the
+/// period (AV x T0), a design choice rather than the paper's (which defines
+/// AV as the pulse's peak amplitude), so the closure excitation is
+/// independent of F0.
 const GLOTTAL_PEAK: f64 = 0.75;
 const REFERENCE_PERIOD_S: f64 = 0.01;
 const PARALLEL_GAIN: f64 = 0.035;
-/// Balances aspiration with the stronger voicing and consonant-noise cues.
+/// Aspiration at the AV level matches the high harmonics of default voicing,
+/// the KLSYN88 calibration, with the voicing's presence boost included.
 const ASPIRATION_GAIN: f64 = 0.0192;
 const VOICE_BAR_GAIN: f64 = 1.0;
 
@@ -253,11 +252,11 @@ impl Peaking {
 }
 
 /// Only voicing needs presence; aspiration and frication have their own shaping.
-/// Together with the vowels' sharp F2 and F3 peaks, it keeps voicing about
-/// 3 dB brighter at 1-4 kHz than Eloquence's, which listeners prefer.
+/// KLSYN88 has no such filter; a listener preferred voicing with this midrange
+/// presence in blind listening.
 const PRESENCE_HZ: f64 = 2200.0;
 const PRESENCE_OCTAVES: f64 = 1.7;
-const PRESENCE_DB: f64 = 4.0;
+const PRESENCE_DB: f64 = 5.0;
 
 /// Bandwidth of the 0 Hz low-pass resonator that attenuates by `tl` dB at
 /// 3 kHz; the paper defines TL by that attenuation.
@@ -410,8 +409,11 @@ impl GlottalSource {
     }
 }
 
-/// Gaussian noise with the 1980 synthesizer's low-pass, which the radiation
-/// characteristic then flattens.
+/// Gaussian noise through a one-pole low-pass, which the radiation first
+/// difference follows. Klatt's (1980) low-pass is an integrator that the
+/// radiation exactly cancels, leaving flat noise; this pole of 0.75 leaves a
+/// high-pass shelf instead (about 8 dB down at 300 Hz relative to 4 kHz),
+/// with which Klatter's consonant and aspiration levels are set.
 struct NoiseSource {
     rng: u32,
     lp: f64,
