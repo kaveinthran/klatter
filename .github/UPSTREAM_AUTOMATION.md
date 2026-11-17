@@ -36,3 +36,13 @@ The automation publishes GitHub downloads. It does not install or update NVDA on
 - [GitHub Actions scheduling and inactivity rules](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 - [Public-repository runner billing](https://docs.github.com/en/actions/concepts/billing-and-usage)
 - [Job token permissions](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token)
+
+## Branch discovery and replaced history
+
+The check reads the exact `refs/heads/main` advertisement with `git ls-remote`, validates its full SHA and fetches that immutable commit. Release detection still requires a complete published `upstream-<SHA>` release and a matching tag; the fork HEAD and maintenance status file are not release baselines. A failed ref lookup fails the job rather than silently skipping a build.
+
+If upstream replaces its entire Git history, the sync joins both histories with a normal merge commit and imports the exact new source snapshot outside `.github`, including source deletions. The fork's automation and old commits are retained; no force push is used. Ordinary source conflicts in related histories still stop for review. If the previous release commit is absent from a fresh upstream checkout, the changelog explicitly reports divergence and includes the complete current history.
+
+To verify after an automation update, open the workflow page linked above, choose **Run workflow**, select **main**, and run it. The check summary must show the currently advertised upstream SHA. A missing or draft release must produce `build_needed=true` and run both build and publish jobs. A complete release must produce `build_needed=false` and skip those jobs. Verify the release's `source.json`, `upstream-<full-SHA>` tag and final public-download verification in the publish log. A green check-only run is not evidence of publication.
+
+The hourly cron expresses the requested frequency, not a delivery guarantee. GitHub may delay or drop scheduled events under load. No external scheduler or additional credentials are configured.

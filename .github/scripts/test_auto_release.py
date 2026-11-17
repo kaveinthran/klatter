@@ -90,6 +90,58 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(automation.previous_source([]), "")
 
 
+class CheckTests(unittest.TestCase):
+    def test_advertised_main_is_used_instead_of_commit_api(self):
+        result = subprocess.CompletedProcess([], 0, SHA + "\trefs/heads/main\n", "")
+        with patch.object(automation, "run", return_value=result) as command:
+            self.assertEqual(automation.upstream_head(Path.cwd()), SHA)
+        self.assertEqual(command.call_args.args[1:4], ("ls-remote", "--exit-code", "--refs"))
+
+    def test_bad_or_ambiguous_advertisement_fails(self):
+        for output in ("", SHA + " refs/heads/other", "unsafe refs/heads/main",
+                       (SHA + " refs/heads/main\n") * 2):
+            with self.subTest(output=output), patch.object(automation, "run", return_value=
+                    subprocess.CompletedProcess([], 0, output, "")):
+                with self.assertRaises(ValueError):
+                    automation.upstream_head(Path.cwd())
+
+    def test_new_source_builds_even_when_old_source_has_a_release(self):
+        self.check_outputs(None, "true")
+
+    def test_complete_source_skips_and_checks_tag(self):
+        self.check_outputs(ReleaseTests().complete_release(), "false")
+
+    def test_unpublished_draft_retries(self):
+        draft = {"draft": True, "target_commitish": SHA}
+        self.check_outputs(draft, "true")
+
+    def check_outputs(self, release, needed):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "outputs"
+            old = "b" * 40
+            releases = [{"tag_name": "upstream-" + old, "target_commitish": old,
+                         "published_at": "2026-11-16T00:00:00Z"}]
+            with patch.object(automation, "upstream_head", return_value=SHA), \
+                    patch.object(automation, "sync_source") as sync, \
+                    patch.object(automation, "find_release", return_value=release) as find, \
+                    patch.object(automation, "api", return_value=releases) as api, \
+                    patch.object(automation, "verify_tag") as verify, \
+                    patch.object(automation, "community_version", return_value="2026.1118.8"), \
+                    patch.object(automation, "summary"), \
+                    patch.dict(os.environ, {"GITHUB_OUTPUT": str(output), "GITHUB_RUN_NUMBER": "8"}):
+                automation.check(root)
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            self.assertEqual(values["sha"], SHA)
+            self.assertEqual(values["build_needed"], needed)
+            self.assertEqual(values["previous_sha"], old)
+            self.assertEqual(values["community_version"], "2026.1118.8" if needed == "true" else "")
+            sync.assert_called_once_with(root, SHA)
+            find.assert_called_once_with(SHA)
+            self.assertEqual(verify.call_count, needed == "false")
+            self.assertNotIn("commits/main", api.call_args.args[0])
+
+
 class ArtifactTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -234,6 +286,30 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.real_run("git", "rev-parse", "HEAD", cwd=self.fork).stdout, first)
         self.sync(source_sha, self.now + timedelta(days=28))
         self.assertNotEqual(self.real_run("git", "rev-parse", "HEAD", cwd=self.fork).stdout, first)
+
+    def test_replaced_history_imports_exact_source_without_losing_automation(self):
+        old = self.real_run("git", "rev-parse", "HEAD", cwd=self.source).stdout.strip()
+        (self.fork / "obsolete.txt").write_text("old source\n")
+        self.commit(self.fork, "Old source only file")
+        self.real_run("git", "checkout", "--orphan", "replacement", cwd=self.source)
+        self.real_run("git", "rm", "-rf", ".", cwd=self.source)
+        (self.source / "engine.txt").write_text("replacement source\n")
+        (self.source / ".github/workflows").mkdir(parents=True)
+        (self.source / ".github/workflows/untrusted.yml").write_text("untrusted\n")
+        current = self.commit(self.source, "Replacement history")
+        self.sync(current)
+        self.assertEqual((self.fork / "engine.txt").read_text(), "replacement source\n")
+        self.assertFalse((self.fork / "obsolete.txt").exists())
+        self.assertFalse((self.fork / ".github/workflows/untrusted.yml").exists())
+        self.assertEqual((self.fork / ".github/workflows/trusted.yml").read_text(), "trusted workflow\n")
+        self.real_run("git", "merge-base", "--is-ancestor", old, "HEAD", cwd=self.fork)
+        self.real_run("git", "merge-base", "--is-ancestor", current, "HEAD", cwd=self.fork)
+        changes, commits = automation.changelog(self.source, current, "f" * 40, "2026.1118.8", "0.1.0")
+        self.assertIn("history diverged", changes)
+        self.assertEqual([commit["sha"] for commit in commits], [current])
+        first = self.real_run("git", "rev-parse", "HEAD", cwd=self.fork).stdout
+        self.sync(current)
+        self.assertEqual(self.real_run("git", "rev-parse", "HEAD", cwd=self.fork).stdout, first)
 
     def test_full_first_history_and_incremental_history_preserve_complete_messages(self):
         previous = self.real_run("git", "rev-parse", "HEAD", cwd=self.source).stdout.strip()

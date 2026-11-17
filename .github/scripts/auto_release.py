@@ -145,7 +145,22 @@ def sync_source(root, source_sha, now=None):
     if ancestor.returncode not in (0, 1):
         raise RuntimeError("Could not inspect upstream ancestry")
     if ancestor.returncode == 1:
-        result = run("git", "merge", "--no-commit", "--no-ff", source_sha, cwd=root, check=False)
+        base = run("git", "merge-base", "HEAD", source_sha, cwd=root, check=False)
+        if base.returncode == 1:
+            # Upstream replaced its entire history. Preserve our history and
+            # automation, but take the exact new source snapshot, including deletions.
+            summary("Upstream history was replaced; importing the exact source snapshot.")
+            result = run("git", "merge", "--allow-unrelated-histories", "-s", "ours",
+                         "--no-commit", "--no-ff", source_sha, cwd=root, check=False)
+            if result.returncode:
+                run("git", "merge", "--abort", cwd=root, check=False)
+                raise RuntimeError("Could not join replaced upstream history")
+            run("git", "restore", "--source=" + source_sha, "--staged", "--worktree",
+                "--", ".", ":(exclude).github", cwd=root)
+        elif base.returncode == 0:
+            result = run("git", "merge", "--no-commit", "--no-ff", source_sha, cwd=root, check=False)
+        else:
+            raise RuntimeError("Could not inspect upstream merge base")
         # This also removes any new upstream workflow files absent in our .github.
         run("git", "restore", "--source=HEAD", "--staged", "--worktree", "--", ".github", cwd=root)
         conflicts = run("git", "diff", "--name-only", "--diff-filter=U", cwd=root).stdout.strip()
@@ -176,9 +191,21 @@ def sync_source(root, source_sha, now=None):
     run("git", "push", "origin", "HEAD:refs/heads/main", cwd=root, env=env)
 
 
+def upstream_head(root):
+    """Read the advertised branch ref, rather than a cached commit response."""
+    result = run("git", "ls-remote", "--exit-code", "--refs",
+                 f"https://github.com/{UPSTREAM}.git", "refs/heads/main", cwd=root)
+    lines = result.stdout.strip().splitlines()
+    if len(lines) != 1:
+        raise ValueError("Expected exactly one advertised upstream main ref")
+    fields = lines[0].split()
+    if len(fields) != 2 or fields[1] != "refs/heads/main":
+        raise ValueError("Unexpected advertised upstream ref")
+    return valid_sha(fields[0])
+
+
 def check(root):
-    commit = api(f"repos/{UPSTREAM}/commits/main")
-    source_sha = valid_sha(commit["sha"])
+    source_sha = upstream_head(root)
     sync_source(root, source_sha)
     release = find_release(source_sha)
     needed = not release_complete(release, source_sha)
@@ -226,7 +253,9 @@ def changelog(source, source_sha, previous_sha, version, upstream_version):
     revision = source_sha
     baseline = "First automated build: the full upstream history is included below."
     if previous_sha:
-        result = run("git", "merge-base", "--is-ancestor", previous_sha, source_sha, cwd=source, check=False)
+        previous = run("git", "cat-file", "-e", previous_sha + "^{commit}", cwd=source, check=False)
+        result = (run("git", "merge-base", "--is-ancestor", previous_sha, source_sha, cwd=source, check=False)
+                  if previous.returncode == 0 else subprocess.CompletedProcess([], 1))
         if result.returncode == 0:
             revision = f"{previous_sha}..{source_sha}"
             baseline = f"Changes since the previous successful source build `{previous_sha}`."
