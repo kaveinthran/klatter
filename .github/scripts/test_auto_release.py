@@ -1,6 +1,7 @@
 """Offline regression tests for publication boundaries and source-sync recovery."""
 from datetime import datetime, timedelta, timezone
 import json
+import io
 import os
 from pathlib import Path
 import struct
@@ -90,6 +91,77 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(automation.previous_source([]), "")
 
 
+class ReleaseNotesTests(unittest.TestCase):
+    def setUp(self):
+        self.product = automation.DESTINATION.rsplit("/", 1)[1].capitalize()
+        addon = self.product.lower() + ".nvda-addon"
+        self.intro = (f"**{self.product} community build 2026.1118.8**, upstream source.\n\n"
+                      f"Download **{addon}** below. Requires NVDA 2026.1.\n\n"
+                      "Tests passed; live installation has not been checked.\n\n"
+                      "Build run and checksum.\n\nLicence information.\n")
+        self.changes = ("# Complete changelog\n\nChanges since the previous successful source build.\n\n"
+                        f"## Older fix\n\n[{'b' * 40}](https://github.com/{automation.UPSTREAM}/commit/{'b' * 40}) - 2026-11-16T00:00:00Z\n\n> Full old details.\n"
+                        f"## Newest [voice] fix\n\n[{SHA}](https://github.com/{automation.UPSTREAM}/commit/{SHA}) - 2026-11-17T00:00:00Z\n\n> Full new details.\n")
+
+    def test_legacy_changelog_is_presented_newest_first_with_downloads(self):
+        notes = automation.format_release_notes(self.intro, self.changes, SHA)
+        self.assertLess(notes.index("Newest"), notes.index("Older fix"))
+        self.assertLess(notes.index("Changes in this release"), notes.index("Build verification"))
+        self.assertIn("Newest \\[voice\\] fix", notes)
+        self.assertIn("/CHANGELOG.md)", notes)
+        self.assertNotIn("> Full new details", notes)
+        self.assertNotIn("# Complete changelog", notes)
+
+    def test_new_attachment_keeps_messages_and_newest_first_heading_order(self):
+        raw = (SHA + "\0" + "2026-11-17T00:00:00Z\0Newest fix\n\nAll new details.\0" +
+               "b" * 40 + "\0" + "2026-11-16T00:00:00Z\0Older fix\n\nAll older details.\0")
+        with patch.object(automation, "run", return_value=subprocess.CompletedProcess([], 0, raw, "")):
+            changes, commits = automation.changelog(Path.cwd(), SHA, "", "2026.1118.8", "1.0")
+        self.assertEqual([item["sha"] for item in commits], [SHA, "b" * 40])
+        self.assertIn("> All new details.", changes)
+        self.assertIn("> All older details.", changes)
+        self.assertIn("## Changes at a glance", changes)
+        self.assertIn("### Newest fix", changes)
+        notes = automation.format_release_notes(self.intro, changes, SHA)
+        self.assertLess(notes.index("Newest fix"), notes.index("Older fix"))
+
+    def test_history_replacement_is_not_described_as_all_new(self):
+        notes = automation.format_release_notes(self.intro,
+            self.changes.replace("Changes since", "Upstream history diverged; changes since"), SHA)
+        self.assertIn("## Recent upstream work", notes)
+        self.assertIn("must not be read as all-new features", notes)
+        self.assertNotIn("## Changes in this release", notes)
+        notes = automation.format_release_notes(self.intro, "First automated build:\n" + self.changes, SHA)
+        self.assertIn("## Included upstream work", notes)
+
+    def test_description_refresh_is_idempotent_and_does_not_change_assets(self):
+        release = ReleaseTests().complete_release()
+        content = self.changes.encode()
+        release.update(id=42, tag_name=automation.release_tag(SHA), body=self.intro + "\n---\n" + self.changes)
+        for asset in release["assets"]:
+            if asset["name"] == "CHANGELOG.md":
+                asset.update(size=len(content), digest="sha256:" + automation.hashlib.sha256(content).hexdigest())
+        notes = automation.format_release_notes(self.intro, self.changes, SHA)
+        updated = release | {"body": notes}
+        with patch.object(automation.urllib.request, "urlopen", side_effect=lambda *a, **k: io.BytesIO(content)), \
+                patch.object(automation, "run", return_value=
+                    subprocess.CompletedProcess([], 0, json.dumps(updated), "")) as run, \
+                patch.object(automation, "summary"):
+            automation.refresh_release_notes(release, SHA)
+            automation.refresh_release_notes(updated, SHA)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[1:4], ("api", "--method", "PATCH"))
+
+    def test_tampered_published_changelog_is_rejected_before_edit(self):
+        release = ReleaseTests().complete_release()
+        release.update(id=42, body=self.intro + "\n---\n" + self.changes)
+        with patch.object(automation.urllib.request, "urlopen", return_value=io.BytesIO(b"bad")), \
+                patch.object(automation, "run") as run:
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                automation.refresh_release_notes(release, SHA)
+            run.assert_not_called()
+
+
 class DraftCreationTests(unittest.TestCase):
     def test_creation_response_is_used_without_a_second_lookup(self):
         draft = {"id": 42, "draft": True, "tag_name": automation.release_tag(SHA),
@@ -158,6 +230,7 @@ class CheckTests(unittest.TestCase):
                     patch.object(automation, "find_release", return_value=release) as find, \
                     patch.object(automation, "api", return_value=releases) as api, \
                     patch.object(automation, "verify_tag") as verify, \
+                    patch.object(automation, "refresh_release_notes"), \
                     patch.object(automation, "community_version", return_value="2026.1118.8"), \
                     patch.object(automation, "summary"), \
                     patch.dict(os.environ, {"GITHUB_OUTPUT": str(output), "GITHUB_RUN_NUMBER": "8"}):

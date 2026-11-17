@@ -46,3 +46,9 @@ If upstream replaces its entire Git history, the sync joins both histories with 
 To verify after an automation update, open the workflow page linked above, choose **Run workflow**, select **main**, and run it. The check summary must show the currently advertised upstream SHA. A missing or draft release must produce `build_needed=true` and run both build and publish jobs. A complete release must produce `build_needed=false` and skip those jobs. Verify the release's `source.json`, `upstream-<full-SHA>` tag and final public-download verification in the publish log. A green check-only run is not evidence of publication.
 
 The hourly cron expresses the requested frequency, not a delivery guarantee. GitHub may delay or drop scheduled events under load. No external scheduler or additional credentials are configured.
+
+## Release notes layout
+
+Release pages show the download and NVDA requirement, then a newest-first index of upstream commit titles, followed by build verification. Full commit messages remain in the checksummed CHANGELOG.md attachment, with an overview and heading navigation in new builds. First builds describe included history. Replaced histories show the five most recent upstream entries and explicitly warn that the full history is not an all-new change list. Normal updates show up to twenty commit titles and link to the complete attachment.
+
+After verifying an existing current-source release and its tag, the check job can migrate its old description once. It verifies the published changelog's size and SHA-256 before editing only the release body and verifies the response and unchanged assets. Already formatted descriptions are skipped without extra downloads or writes. Existing installers, attachments, tags and checksums are preserved.

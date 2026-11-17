@@ -11,6 +11,7 @@ import re
 import shutil
 import struct
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -211,6 +212,7 @@ def check(root):
     needed = not release_complete(release, source_sha)
     if not needed:
         verify_tag(source_sha)
+        refresh_release_notes(release, source_sha)
     published = api(f"repos/{DESTINATION}/releases?per_page=100")
     previous_sha = previous_source(published)
     version = community_version(source_sha, release, os.environ["GITHUB_RUN_NUMBER"]) if needed else ""
@@ -263,7 +265,7 @@ def changelog(source, source_sha, previous_sha, version, upstream_version):
             baseline = "Upstream history diverged from the previous build; the full current history is included."
         else:
             raise RuntimeError("Cannot establish changelog baseline")
-    raw = run("git", "log", "--reverse", "--topo-order", "--format=%H%x00%cI%x00%B%x00", revision, cwd=source).stdout
+    raw = run("git", "log", "--topo-order", "--format=%H%x00%cI%x00%B%x00", revision, cwd=source).stdout
     parts = raw.split("\x00")
     if not parts[-1].strip():
         parts.pop()
@@ -275,17 +277,21 @@ def changelog(source, source_sha, previous_sha, version, upstream_version):
                 "Current capabilities and limitations are documented in CURRENT_FEATURES.md, a complete snapshot "
                 "of the upstream README for this source. Commit descriptions below are the upstream author's "
                 "messages; links open the complete code changes.\n"]
-    if previous_sha:
-        sections.append(f"\n[Complete source comparison](https://github.com/{UPSTREAM}/compare/{previous_sha}...{source_sha})\n")
+    if revision != source_sha:
+        sections[0] += f"\n[Complete source comparison](https://github.com/{UPSTREAM}/compare/{previous_sha}...{source_sha})\n"
     for index in range(0, len(parts), 3):
         commit_sha, timestamp, message = parts[index].strip(), parts[index+1].strip(), parts[index+2].rstrip()
         valid_sha(commit_sha)
         subject = message.splitlines()[0] if message else "(no commit message)"
         commits.append({"sha": commit_sha, "subject": subject})
         quoted = "\n".join("> " + line for line in message.splitlines())
-        sections.append(f"\n## {subject}\n\n[{commit_sha}](https://github.com/{UPSTREAM}/commit/{commit_sha}) "
+        sections.append(f"\n### {subject}\n\n[{commit_sha}](https://github.com/{UPSTREAM}/commit/{commit_sha}) "
                         f"- {timestamp}\n\n{quoted}\n")
-    sections.insert(1, f"\nIncluded commits: **{len(commits)}**. No commit messages are truncated.\n")
+    index = "\n## Changes at a glance\n\nNewest commits first. These are upstream commit titles; full messages follow.\n\n"
+    index += "\n".join(f"- [{markdown_label(item['subject'])}](https://github.com/{UPSTREAM}/commit/{item['sha']})"
+                       for item in commits)
+    sections.insert(1, f"\nIncluded commits: **{len(commits)}**. No commit messages are truncated.\n" +
+                    index + "\n\n## Full commit messages\n")
     return "".join(sections), commits
 
 
@@ -417,6 +423,88 @@ def verify_upload(release, root):
             raise ValueError("Uploaded asset hash/size mismatch")
 
 
+def markdown_label(text):
+    return re.sub(r"([\\`*_{}\[\]<>])", r"\\\1", text)
+
+
+def format_release_notes(intro, changes, source_sha):
+    """Keep downloads and a scoped commit index ahead of build metadata."""
+    valid_sha(source_sha)
+    pattern = (r"(?m)^#{2,3} (.+)\n\n\[([0-9a-f]{40})\]\(" +
+               re.escape(f"https://github.com/{UPSTREAM}/commit/") + r"\2\) - ([^\n]+)")
+    entries = re.findall(pattern, changes)
+    if not entries:
+        raise ValueError("Cannot locate complete upstream commit entries")
+    if "## Changes at a glance\n" not in changes:
+        entries.reverse()  # Previously published attachments were oldest first.
+    diverged = "Upstream history diverged" in changes
+    first = "First automated build:" in changes
+    if diverged:
+        heading = "Recent upstream work"
+        scope = ("Upstream replaced its Git history. A reliable commit-by-commit list of changes since "
+                 "the previous release is unavailable. The entries below are recent upstream work; "
+                 "the full changelog includes older history and must not be read as all-new features.")
+        limit = 5
+    elif first:
+        heading = "Included upstream work"
+        scope = "First automated build: these entries describe the included upstream history, rather than changes from an earlier community build."
+        limit = 20
+    else:
+        heading = "Changes in this release"
+        scope = "Upstream commits since the previous successful community build, newest first."
+        limit = 20
+    paragraphs = intro.strip().split("\n\n")
+    if len(paragraphs) < 4:
+        raise ValueError("Unexpected automated release introduction")
+    base = f"https://github.com/{DESTINATION}/releases/download/{release_tag(source_sha)}"
+    addon = DESTINATION.rsplit("/", 1)[1].lower() + ".nvda-addon"
+    download = paragraphs[1].replace(f"Download **{addon}** below.", f"[Download {addon}]({base}/{addon}).")
+    index = "\n".join(f"- [{markdown_label(subject)}](https://github.com/{UPSTREAM}/commit/{sha})"
+                      for subject, sha, timestamp in entries[:limit])
+    more = f"\n\nShowing {limit} of {len(entries)} entries; the full changelog retains every message." if len(entries) > limit else ""
+    return (paragraphs[0] + "\n\n## Download and compatibility\n\n" + download +
+            "\n\n<!-- upstream-change-notes:v1 -->\n\n## " + heading + "\n\n" + scope + "\n\n" + index + more +
+            f"\n\n[Full changelog, including complete commit messages]({base}/CHANGELOG.md). "
+            f"[Current features and limitations]({base}/CURRENT_FEATURES.md).\n\n" +
+            "## Build verification and source\n\n" + "\n\n".join(paragraphs[2:]) + "\n")
+
+
+def refresh_release_notes(release, source_sha):
+    """Refresh only the description of a verified current-source release."""
+    if not release_complete(release, source_sha):
+        raise ValueError("Cannot refresh an unpublished release")
+    body = release.get("body", "")
+    product = DESTINATION.rsplit("/", 1)[1].capitalize()
+    if not body.startswith(f"**{product} community build "):
+        raise ValueError("Refusing to replace an unrecognized release description")
+    if "\n<!-- upstream-change-notes:v1 -->\n" in body:
+        return  # Already formatted; ordinary hourly checks need no extra downloads or writes.
+    if "\n---\n" not in body:
+        raise ValueError("Cannot recover the automated release introduction")
+    intro = body.split("\n---\n", 1)[0]
+    asset = next(a for a in release["assets"] if a["name"] == "CHANGELOG.md")
+    url = f"https://github.com/{DESTINATION}/releases/download/{release_tag(source_sha)}/CHANGELOG.md"
+    with urllib.request.urlopen(url, timeout=30) as response:
+        content = response.read(asset["size"] + 1)
+    if len(content) != asset["size"] or "sha256:" + hashlib.sha256(content).hexdigest() != asset["digest"]:
+        raise ValueError("Published changelog checksum mismatch")
+    notes = format_release_notes(intro, content.decode("utf-8"), source_sha)
+    if notes == body:
+        return
+    with tempfile.TemporaryDirectory() as temporary:
+        request = Path(temporary) / "release-description.json"
+        write_utf8(request, json.dumps({"body": notes}))
+        result = run("gh", "api", "--method", "PATCH",
+                     f"repos/{DESTINATION}/releases/{release['id']}", "--input", str(request))
+    updated = json.loads(result.stdout)
+    if (updated.get("id") != release["id"] or updated.get("body") != notes or
+            updated.get("tag_name") != release_tag(source_sha) or
+            updated.get("assets") != release["assets"] or
+            not release_complete(updated, source_sha)):
+        raise ValueError("Release description update verification failed")
+    summary("Updated the release description; verified release assets remain unchanged.")
+
+
 def create_draft(source_sha, title, notes_path):
     """Use the creation response; a new draft may not appear in list/tag reads yet."""
     tag = release_tag(source_sha)
@@ -462,12 +550,7 @@ def publish(root, source_sha):
         "Upstream may change its code without changing the version number; the source commit identifies this build.\n"
     )
     full_changes = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    if len(notes) + len(full_changes) < 100000:
-        notes += "\n---\n\n" + full_changes
-    else:
-        notes += f"\nThe complete {info['commit_count']}-commit changelog is attached as **CHANGELOG.md**; "
-        notes += "it exceeds GitHub's release-description size limit. No messages were removed from the attachment.\n"
-    notes += "\nSee **CURRENT_FEATURES.md** for the complete current upstream documentation, features and known limitations.\n"
+    notes = format_release_notes(notes, full_changes, source_sha)
     notes_path = root.parent / "release-notes.md"
     notes_path.write_text(notes, encoding="utf-8")
     if not release:
